@@ -1,0 +1,368 @@
+---
+title: "individual_capstone"
+author: "Ekundayo Azubuike"
+date: "2024-12-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE)
+```
+
+# Introduction
+
+## Case and Data Overview 
+
+Wine producers are interested in creating products that consumers rate highly. The quality of wine has implications for sales and ultimately revenue. The following analysis aims to predict the quality of wine given 11 features: fixed acidity, volatile acidity, citric acid, residual sugar, chlorides, free sulfur dioxide, total sulfur dioxide, density, pH, sulphates, and alcohol. For more information on the data set, please review the references at the end of this document. 
+
+## Summary
+
+The following steps were performed the the course of the analysis:
+
+- environmental setup
+- loading data
+- data pre-processing and exploratory analysis
+- model construction and evaluation
+  - base ("naive") model
+  - generalized linear model
+  - k-nearest neighbors model
+  - random tree model
+  - random forest model
+
+Ultimately, a random forest model with overall accuracy of `0.6972` was selected.
+
+# Method/Analysis
+
+## Environment Setup
+
+I first initialized the environment by downloading relevant packages for data analysis and machine learning tasks as follows:
+
+```{r message=F}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(Hmisc)) install.packages("Hmisc", repos = "http://cran.us.r-project.org")
+if(!require(dslabs)) install.packages("dlabs", repos = "http://cran.us.r-project.org")
+if(!require(GGally)) install.packages("GGally", repos = "http://cran.us.r-project.org")
+if(!require(ggthemes)) install.packages("ggthemes", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(moments)) install.packages("moments", repos = "http://cran.us.r-project.org")
+
+ds_theme_set()
+
+options(timeout = 120)
+```
+
+## Download and Load Data
+
+Next, I downloaded the relevant files and created the `data.frame` objects I would be working with. As the red and white wines were contained in separate `.csv` files, I merged them, and created a new predictor called `color`.
+
+```{r}
+# download and load data set
+dl <- "wine_quality.zip"
+if(!file.exists(dl))
+  download.file("https://archive.ics.uci.edu/static/public/186/wine+quality.zip", dl)
+
+red_file <- "winequality-red.csv"
+if(!file.exists(red_file))
+  unzip(dl, red_file)
+
+white_file <- "winequality-white.csv"
+if(!file.exists(white_file))
+  unzip(dl, white_file)
+
+red.df <- read_delim(file = red_file,
+                     delim = ";",
+                     col_types = list(
+                       quality = col_integer(),
+                       .default = col_double()))
+red.df$color <- "red"
+
+white.df <- read_delim(file = white_file,
+                       delim = ";",
+                       col_types = list(
+                         quality = col_integer(),
+                         .default = col_double()))
+white.df$color = "white"
+
+names(red.df) <- make.names(colnames(red.df))
+names(white.df) <- make.names(colnames(white.df))
+
+wine.df <- rbind(red.df, white.df)
+wine.df <- wine.df %>%
+  mutate(color = as_factor(color))
+
+wine.df %>% head()
+```
+
+## Data Pre-processing and Exploratory Data Analysis
+
+I split the data into training and testing sets using a 20% split. I scaled the data in order to make it more interpretable during exploratory data analysis.
+
+```{r}
+wine.x <- wine.df %>% 
+  select(-quality)
+wine.y <- wine.df %>% 
+  select(quality)
+
+# data pre-processing
+set.seed(2024)
+
+test.index <- createDataPartition(wine.y$quality,
+                                  p = 0.2,
+                                  list = FALSE)
+wine.x.train <- wine.x[-test.index,]
+wine.x.test <- wine.x[test.index,]
+wine.y.train <- wine.y[-test.index,]
+wine.y.test <- wine.y[test.index,]
+
+head(wine.x.train)
+summary(wine.x.train)
+
+wine.x.train.scaled <- wine.x.train %>% 
+  mutate_if(is.numeric, function(x) { (x - mean(x)) / sd(x) })
+
+wine.x.test.scaled <- wine.x.test %>% 
+  mutate_if(is.numeric, function(x) { (x - mean(x)) / sd(x) })
+```
+### Distribution and Transformation of Predictors 
+
+Examination of the following box plot reveals that most of the variables have positive skew, with the six variables in the following table having the most significant skew.
+
+```{r}
+# boxplots of variables
+wine.x.train %>% 
+  select(-color) %>% 
+  mutate_all(scale) %>% 
+  pivot_longer(cols = names(wine.x.train)[-12]) %>% 
+  group_by(name) %>% 
+  ggplot(aes(x = name, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+```
+
+```{r}
+# skew of variables
+wine.x.train %>% 
+  select(-color) %>% 
+  pivot_longer(cols = names(wine.x.train)[-12]) %>% 
+  group_by(name) %>%
+  summarise(skew = skewness(value)) %>% 
+  filter(skew > 1 | skew < -1)
+```
+I performed a log transformation on the numeric predictors to remove skew in order to improve model performance down the line, as normalcy of predictors is preferred.
+
+```{r}
+# log transformation of data to remove skewness
+high.skew.ind <- c("chlorides", "fixed.acidity", "free.sulfur.dioxide", 
+               "residual.sugar", "sulphates", "volatile.acidity")
+low.skew.train <- wine.x.train[names(wine.x.train)[!names(wine.x.train) %in% high.skew.ind]]
+low.skew.test <- wine.x.test[names(wine.x.test)[!names(wine.x.test) %in% high.skew.ind]]
+
+wine.x.train %>% 
+  select(all_of(high.skew.ind)) %>% 
+  pivot_longer(cols = high.skew.ind) %>%
+  mutate(value = ifelse(value == 0, 0, log(value))) %>%
+  group_by(name) %>%
+  summarise(skew = skewness(value))
+```
+
+```{r}
+# log transform data 
+wine.x.train.scaled <- sapply(wine.x.train[high.skew.ind], function(x){
+  ifelse(x == 0, 0, log(x)) }) %>% 
+  cbind(low.skew.train) %>%
+  mutate(color = factor(color)) %>% 
+  data.frame()
+
+wine.x.test.scaled <- sapply(wine.x.test[high.skew.ind], function(x){
+  ifelse(x == 0, 0, log(x)) }) %>% 
+  cbind(low.skew.test) %>% 
+  mutate(color = factor(color)) %>% 
+  data.frame()
+```
+
+The skewness of all variables has improved.
+
+```{r}
+# skew of log-transformed variables
+wine.x.train.scaled %>% 
+  select(-color) %>% 
+  pivot_longer(cols = names(wine.x.train.scaled)[-12]) %>% 
+  group_by(name) %>%
+  summarise(skew = skewness(value))
+```
+Examination of a box plot of scaled and log transformed predictors demonstrates that the distribution of values for each is normalized. Several outliers (±3 standard deviations from mean = 0) exist for each variable. For now, I will carry on with analysis without addressing them.
+
+```{r}
+# box plots of scaled and log-transformed variables
+wine.x.train.scaled %>% 
+  select(-color) %>% 
+  mutate_all(scale) %>% 
+  pivot_longer(cols = names(wine.x.train.scaled)[-12]) %>% 
+  group_by(name) %>% 
+  ggplot(aes(x = name, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+```
+### Correlation and Variable Selection
+
+A correlation matrix reveals that two set of variables are significantly correlated (Spearman's rank coefficient > 0.6 or < -0.6): `alcohol` and `density` (-0.7) as well as `sulfur.dioxide` and `free.sulfur.dioxide` (0.7). 
+
+```{r echo=F}
+ggcorr(wine.x.train.scaled,
+       size = 2,
+       label_size = 2,
+       hjust = 0.9,
+       angle = -45,
+       label = TRUE)
+```
+
+In order to remove confounders from modeling techniques that will be sensitive to the correlations, I created a new variable `alcohol.density` that is a linear combination of `alcohol` and `density` in order to remove correlation but preserve the data from each column. Then, because `free.sulfur.dioxide` is the difference between `total.sulfur.dioxide` and bound sulfur dioxide, I removed the `free.sulfur.dioxide` variable to avoid redundant data. 
+
+```{r} 
+wine.train <- tibble(cbind(wine.x.train.scaled, wine.y.train$quality)) %>% 
+  rename(quality = `wine.y.train$quality`)
+wine.train %>% head() 
+
+wine.train.selected <- wine.train %>% 
+  mutate(alcohol.density = alcohol * density) %>% 
+  select(-c(alcohol, density, free.sulfur.dioxide))
+wine.train.selected %>% head() 
+
+wine.test <- tibble(cbind(wine.x.test.scaled, wine.y.test$quality)) %>% 
+  rename(quality = `wine.y.test$quality`) 
+wine.test %>% head() 
+
+wine.test.selected <-  wine.test %>%
+  mutate(alcohol.density = alcohol * density) %>% 
+  select(-c(alcohol, density, free.sulfur.dioxide))
+wine.test.selected %>% head() 
+```
+
+# Results
+
+## Base Model
+
+I constructed a base model that uses the mean (`mu`) as the prediction for the target variable `quality`. This approach yields a baseline RMSE of `0.8750728`.
+
+```{r}
+# base model
+mu <- mean(as.numeric(wine.train$quality))
+
+base.pred <- rep(mu, 
+                 times = length(wine.test$quality))
+base.rmse <- RMSE(base.pred, as.numeric(wine.test$quality))
+base.rmse %>% kable()
+```
+
+## Linear Model
+
+I then constructed a generalized linear model of `quality` as a function of the previously selected variables. I also performed a pre-processing step to center the data for analysis. This approach yielded an improved RMSE of `0.7323501` as compared to the base model.
+
+```{r}
+# linear model
+wine.lm <- train(quality ~ .,
+                 data = wine.train.selected,
+                 preProcess = "center",
+                 method = "glm")
+
+lm.rmse <- RMSE(predict(wine.lm, wine.test.selected),
+                wine.test.selected$quality)
+lm.rmse %>% kable()
+```
+
+## K-Nearest Neighbors Model
+
+I next constructed a k-nearest neighbors classification model with 10-fold cross-validation, a scaling pre-process step, and a tuning grid comprised of a range of values for `k` between 5 and 25. The ideal value of `k` is `7`. Using this value, the model achieves an overall accuracy of `0.5327`, with the highest balanced accuracy for wines with a `quality` of 5: `0.7123`.
+
+```{r}
+# knn
+wine.train <- wine.train %>% 
+  mutate(quality = factor(quality))
+
+wine.test <- wine.test %>% 
+  mutate(quality = factor(quality))
+
+quality.levels <- levels(wine.test$quality)
+controls <- trainControl(method = "cv", p = 0.8, number = 10)
+grid = data.frame(k = seq(5, 25, 2))
+
+wine.knn <- train(quality ~ .,
+                  method = "knn",
+                  data = wine.train,
+                  trControl = controls,
+                  tuneGrid = grid)
+wine.knn$bestTune %>% kable()
+
+knn.preds <- factor(predict(wine.knn, wine.test),
+                    levels = levels(wine.test$quality))
+knn.cm <- confusionMatrix(knn.preds, wine.test$quality)
+knn.cm
+```
+
+## Random Tree Model
+
+I next constructed a random tree and tested a range of values for `cp`. The selected value for `cp` was `0.004166667`. This model yielded an overall accuracy of `0.5519`, a decrease from the KNN model.
+
+```{r}
+# Random Tree
+wine.rt <- train(quality ~ .,
+                 data = wine.train,
+                 tuneGrid = data.frame(cp = seq(0.0, 0.1, len = 25)),
+                 method = "rpart")
+
+wine.rt$bestTune %>% kable()
+
+rt.preds <- factor(predict(wine.rt, wine.test),
+                   levels = levels(wine.test$quality))
+
+rt.cm <- confusionMatrix(rt.preds, wine.test$quality)
+rt.cm
+```
+
+## Random Forest
+
+Lastly, I constructed a random forest model of 150 trees with 5-fold cross validation, a range of minimum node sizes between 3 and 50, and 3 variables randomly sampled as candidates at each split. This model yielded the highest accuracy measure: `0.6972`. The ideal hyperparameter values are `predFixed = 3` and `minNode = 3`.
+
+```{r}
+# Random Forest
+controls <- trainControl(method="cv", p = 0.8, number = 5)
+
+wine.rf <- train(quality ~ .,
+                 data = wine.train,
+                 method = "Rborist",
+                 trControl = controls,
+                 tuneGrid = data.frame(predFixed = 3,
+                                       minNode = c(3, 50)),
+                 preProcess = "scale",
+                 nTree = 150)
+
+summary(wine.rf) 
+wine.rf$bestTune
+
+rf.preds <- factor(predict(wine.rf, wine.test),
+                   levels = levels(wine.test$quality))
+
+rf.cm <- confusionMatrix(rf.preds,
+                         wine.test$quality)
+rf.cm
+```
+
+# Conclusion
+
+## Summary
+
+After data pre-processing, variable selection, and hyperparameter tuning, the best-performing model was the random forest with an overall accuracy of `0.6972`. 
+
+## Limitations
+
+In future investigations, I would like to explore the impact of removing outliers from the data set on predictive power of the models. Moreover, there are other machine learning algorithms that may provide even greater accuracy. The authors of the referenced paper decided on a support vector machine (SVM) model. I would also be interested in understanding how well a boosted tree would perform for this analysis.
+
+# References
+
+-   [Wine Quality Data](https://archive.ics.uci.edu/dataset/186/wine+quality)
+-   [Modeling wine preferences by data mining from physicochemical properties](https://www.semanticscholar.org/paper/Modeling-wine-preferences-by-data-mining-from-Cortez-Cerdeira/bf15a0ccc14ac1deb5cea570c870389c16be019c)
+    -   By P. Cortez, A. Cerdeira, Fernando Almeida, Telmo Matos, J. Reis. 2009 (Published in Decision Support Systems)
